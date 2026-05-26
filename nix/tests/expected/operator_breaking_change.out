@@ -1,0 +1,50 @@
+-- Pin CVE-2026-2004 behaviour: attaching a non-built-in selectivity estimator
+-- to an operator requires superuser. Verified against both RESTRICT and JOIN.
+--
+-- Upstream commits: b764b26f (PG 15.16), bbf5bcf5 (PG 17.8). The check fires in
+-- both ValidateRestrictionEstimator() and ValidateJoinEstimator() in
+-- src/backend/commands/operatorcmds.c.
+--
+-- Refs: PSQL-1110, PSQL-1234.
+BEGIN;
+-- Build a non-built-in restriction estimator and a non-built-in join estimator.
+CREATE FUNCTION public.fake_restrict_sel(internal, oid, internal, integer)
+  RETURNS float8 LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE
+  AS $$ SELECT 0.5::float8 $$;
+CREATE FUNCTION public.fake_join_sel(internal, oid, internal, smallint, internal)
+  RETURNS float8 LANGUAGE sql IMMUTABLE STRICT PARALLEL SAFE
+  AS $$ SELECT 0.5::float8 $$;
+-- Trivial procedure for the operator definition.
+CREATE FUNCTION public.fake_op_proc(_int4, _int4)
+  RETURNS bool LANGUAGE sql IMMUTABLE
+  AS $$ SELECT true $$;
+-- Switch to a non-superuser role.
+SET ROLE postgres;
+-- 1) RESTRICT = non-built-in should be rejected.
+SAVEPOINT before_restrict;
+CREATE OPERATOR public.@@@ (
+  LEFTARG = _int4, RIGHTARG = _int4,
+  PROCEDURE = public.fake_op_proc,
+  RESTRICT = public.fake_restrict_sel
+);
+ERROR:  must be superuser to specify a non-built-in restriction estimator function
+ROLLBACK TO SAVEPOINT before_restrict;
+-- 2) JOIN = non-built-in should be rejected.
+SAVEPOINT before_join;
+CREATE OPERATOR public.@@@ (
+  LEFTARG = _int4, RIGHTARG = _int4,
+  PROCEDURE = public.fake_op_proc,
+  JOIN = public.fake_join_sel
+);
+ERROR:  must be superuser to specify a non-built-in join estimator function
+ROLLBACK TO SAVEPOINT before_join;
+-- 3) Sanity check: built-in selectivity estimators still work for non-superusers.
+CREATE OPERATOR public.@@@ (
+  LEFTARG = _int4, RIGHTARG = _int4,
+  PROCEDURE = public.fake_op_proc,
+  RESTRICT = eqsel,
+  JOIN = eqjoinsel
+);
+DROP OPERATOR public.@@@ (_int4, _int4);
+RESET ROLE;
+ROLLBACK;
